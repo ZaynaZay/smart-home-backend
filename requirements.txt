@@ -1,0 +1,13 @@
+fastapi
+pydantic
+uvicorn
+python-multipart
+deepface
+tensorflow-cpu==2.18.0
+keras==3.8.0
+numpy==1.26.4
+opencv-python-headless==4.9.0.80
+tf-keras
+websockets
+supabase
+python-dotenv
