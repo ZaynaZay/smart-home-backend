@@ -53,34 +53,35 @@ EMOTION_LABELS = ['angry', 'disgust', 'fear', 'happy', 'neutral', 'sad', 'surpri
 # --- EMOTION → Music/Wallpaper Map ---
 EMOTION_MAP = {
     "angry": {
-        "music": "/home/Ares/Music/Energetic/funky_electronic_energetic.wav",
+        "music": "/home/Ares/Music/Energetic",
         "wallpaper": "/home/Ares/Pictures/Wallpapers/hopeful.jpg"
     },
     "disgust": {
-        "music": "/home/Ares/Music/Energetic/funky_electronic_energetic.wav",
+        "music": "/home/Ares/Music/Energetic",
         "wallpaper": "/home/Ares/Pictures/Wallpapers/hopeful.jpg"
     },
     "fear": {
-        "music": "/home/Ares/Music/Calm/lofi_decompression_calm.wav",
+        "music": "/home/Ares/Music/Calm",
         "wallpaper": "/home/Ares/Pictures/Wallpapers/serene_blue.jpg"
     },
     "happy": {
-        "music": "/home/Ares/Music/Uplifting/cinematic_hope_uplifting.wav",
+        "music": "/home/Ares/Music/Uplifting",
         "wallpaper": "/home/Ares/Pictures/Wallpapers/hopeful.jpg"
     },
     "neutral": {
-        "music": "/home/Ares/Music/Calm/lofi_decompression_calm.wav",
+        "music": "/home/Ares/Music/Calm",
         "wallpaper": "/home/Ares/Pictures/Wallpapers/serene_blue.jpg"
     },
     "sad": {
-        "music": "/home/Ares/Music/Calm/lofi_decompression_calm.wav",
+        "music": "/home/Ares/Music/Calm",
         "wallpaper": "/home/Ares/Pictures/Wallpapers/serene_blue.jpg"
     },
     "surprise": {
-        "music": "/home/Ares/Music/Uplifting/cinematic_hope_uplifting.wav",
+        "music": "/home/Ares/Music/Uplifting",
         "wallpaper": "/home/Ares/Pictures/Wallpapers/hopeful.jpg"
     }
 }
+
 
 # --- Pydantic Model ---
 class AnalyzeRequest(BaseModel):
