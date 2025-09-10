@@ -6,8 +6,13 @@ import cv2
 import numpy as np
 import tensorflow as tf
 import keras
+import subprocess
+import time
+
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.concurrency import run_in_threadpool
+from pydantic import BaseModel
 from deepface import DeepFace
 from supabase import create_client, Client
 from dotenv import load_dotenv
@@ -16,14 +21,19 @@ from dotenv import load_dotenv
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 load_dotenv()
 app = FastAPI()
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"]
+)
 
 # --- Supabase Clients ---
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
-SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY")
-if not all([SUPABASE_URL, SUPABASE_SERVICE_KEY, SUPABASE_ANON_KEY]):
-    raise RuntimeError("Supabase URL, Service Key, and Anon Key must be set in .env file.")
+if not all([SUPABASE_URL, SUPABASE_SERVICE_KEY]):
+    raise RuntimeError("Supabase URL and Service Key must be set in .env file.")
 supabase_admin: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 # --- Load Custom Model ---
@@ -40,97 +50,189 @@ except Exception as e:
 
 EMOTION_LABELS = ['angry', 'disgust', 'fear', 'happy', 'neutral', 'sad', 'surprise']
 
-# --- Helper Function ---
+# --- EMOTION → Music/Wallpaper Map ---
+EMOTION_MAP = {
+    "angry": {
+        "music": "/home/Ares/Music/Energetic/funky_electronic_energetic.wav",
+        "wallpaper": "/home/Ares/Pictures/Wallpapers/hopeful.jpg"
+    },
+    "disgust": {
+        "music": "/home/Ares/Music/Energetic/funky_electronic_energetic.wav",
+        "wallpaper": "/home/Ares/Pictures/Wallpapers/hopeful.jpg"
+    },
+    "fear": {
+        "music": "/home/Ares/Music/Calm/lofi_decompression_calm.wav",
+        "wallpaper": "/home/Ares/Pictures/Wallpapers/serene_blue.jpg"
+    },
+    "happy": {
+        "music": "/home/Ares/Music/Uplifting/cinematic_hope_uplifting.wav",
+        "wallpaper": "/home/Ares/Pictures/Wallpapers/hopeful.jpg"
+    },
+    "neutral": {
+        "music": "/home/Ares/Music/Calm/lofi_decompression_calm.wav",
+        "wallpaper": "/home/Ares/Pictures/Wallpapers/serene_blue.jpg"
+    },
+    "sad": {
+        "music": "/home/Ares/Music/Calm/lofi_decompression_calm.wav",
+        "wallpaper": "/home/Ares/Pictures/Wallpapers/serene_blue.jpg"
+    },
+    "surprise": {
+        "music": "/home/Ares/Music/Uplifting/cinematic_hope_uplifting.wav",
+        "wallpaper": "/home/Ares/Pictures/Wallpapers/hopeful.jpg"
+    }
+}
+
+# --- Pydantic Model ---
+class AnalyzeRequest(BaseModel):
+    image: str  # Expecting a data URL string
+
+# --- Helper Functions ---
 def preprocess_image_for_custom_model(img_color):
-    if len(img_color.shape) == 2: gray_img = img_color
-    else: gray_img = cv2.cvtColor(img_color, cv2.COLOR_BGR2GRAY)
+    """
+    Preprocesses the image for the custom emotion detection model.
+    """
+    if len(img_color.shape) == 2:
+        gray_img = img_color
+    else:
+        gray_img = cv2.cvtColor(img_color, cv2.COLOR_BGR2GRAY)
     resized_img = cv2.resize(gray_img, (48, 48))
     normalized_img = resized_img / 255.0
     return np.expand_dims(np.expand_dims(normalized_img, axis=-1), axis=0)
 
+def detect_desktop_env():
+    """
+    Detects the desktop environment.
+    """
+    desktop = os.environ.get("XDG_CURRENT_DESKTOP", "").lower()
+    if "kde" in desktop:
+        return "kde"
+    elif "xfce" in desktop:
+        return "xfce"
+    else:
+        return "unknown"
+
+def change_wallpaper(file_path: str):
+    """
+    Changes wallpaper depending on desktop environment (KDE or XFCE).
+    """
+    if not os.path.exists(file_path):
+        logging.warning(f"❌ ERROR: Wallpaper image not found at: {file_path}")
+        return
+
+    env = detect_desktop_env()
+    logging.info(f"🖼️  Detected Desktop Environment: {env.upper()}")
+    logging.info(f"🖼️  Changing wallpaper to: {file_path}")
+
+    try:
+        if env == "kde":
+            # KDE Plasma wallpaper change
+            script = f"""
+var Desktops = desktops();
+for (i=0;i<Desktops.length;i++) {{
+    d = Desktops[i];
+    d.wallpaperPlugin = 'org.kde.image';
+    d.currentConfigGroup = Array('Wallpaper', 'org.kde.image', 'General');
+    d.writeConfig('Image', 'file://{file_path}');
+}}
+"""
+            subprocess.run([
+                "qdbus",
+                "org.kde.plasmashell",
+                "/PlasmaShell",
+                "org.kde.PlasmaShell.evaluateScript",
+                script
+            ], check=True, capture_output=True, text=True)
+            logging.info("✅ SUCCESS: Wallpaper changed in KDE Plasma.")
+
+        elif env == "xfce":
+            command = [
+                "xfconf-query",
+                "-c", "xfce4-desktop",
+                "-p", "/backdrop/screen0/monitor0/workspace0/last-image",
+                "-s", file_path
+            ]
+            subprocess.run(command, check=True, capture_output=True, text=True)
+            subprocess.run(["xfdesktop", "--reload"], check=False)
+            logging.info("✅ SUCCESS: Wallpaper changed in XFCE.")
+
+        else:
+            logging.warning("⚠️ WARNING: Unknown desktop environment. Wallpaper not changed.")
+
+    except FileNotFoundError as e:
+        logging.error(f"❌ ERROR: Required command not found: {e}")
+    except subprocess.CalledProcessError as e:
+        logging.error(f"❌ ERROR: Wallpaper command failed. Details: {e.stderr}")
+    except Exception as e:
+        logging.error(f"❌ ERROR: Unexpected error: {e}")
+
+
+def play_music(file_path: str):
+    """
+    Writes the music file path to a command file for the desktop agent to read.
+    """
+    COMMAND_FILE = "/tmp/media_player.command"
+    logging.info(f"🎵 Sending command to play: {file_path}")
+    try:
+        with open(COMMAND_FILE, 'w') as f:
+            f.write(file_path)
+        logging.info("✅ SUCCESS: Command sent to desktop agent.")
+    except Exception as e:
+        logging.error(f"❌ ERROR: Could not write command file: {e}")
+
 # --- Main API Endpoint ---
 @app.post("/api/analyze")
-async def analyze_emotion(request: Request):
-    """
-    Analyzes an image for emotion using DeepFace and a custom model.
-    Logs the emotion and triggers actions via a Supabase database function.
-    """
+async def analyze_emotion(request: Request, body: AnalyzeRequest):
     try:
-        # --- 1. User Authentication ---
         auth_header = request.headers.get("authorization")
         if not auth_header or not auth_header.startswith("Bearer "):
             raise HTTPException(status_code=401, detail="Missing or invalid Authorization header.")
-        
         user_jwt = auth_header.split(" ")[1]
         try:
-            # Use the admin client to verify the user's JWT
-            current_user = supabase_admin.auth.get_user(user_jwt).user
+            user_response = await run_in_threadpool(supabase_admin.auth.get_user, user_jwt)
+            current_user = user_response.user
         except Exception:
             raise HTTPException(status_code=401, detail="Invalid or expired token.")
 
-        # --- 2. Image Decoding ---
-        body = await request.json()
-        image_data_url = body.get("image")
-        if not image_data_url: raise HTTPException(status_code=400, detail="No image data provided.")
-        
-        header, encoded = image_data_url.split(",", 1)
+        # Decode image
+        header, encoded = body.image.split(",", 1)
         decoded_image = base64.b64decode(encoded)
         nparr = np.frombuffer(decoded_image, np.uint8)
         img_color = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        if img_color is None: raise HTTPException(status_code=400, detail="Invalid image data.")
+        if img_color is None:
+            raise HTTPException(status_code=400, detail="Invalid image data.")
 
-        # --- 3. Emotion Analysis (DeepFace & Custom Model) ---
-        final_emotion, source, highest_confidence = "unknown", "none", 0.0
-        
-        # DeepFace analysis
+        # Analyze emotion
+        # final_emotion, source = "unknown", "none"
         try:
-            analysis = DeepFace.analyze(img_color, actions=['emotion'], enforce_detection=False, silent=True)
+            analysis = await run_in_threadpool(
+                DeepFace.analyze, img_path=img_color,
+                actions=['emotion'], enforce_detection=False, silent=True
+            )
             if analysis and isinstance(analysis, list) and len(analysis) > 0:
-                df_emotion, df_confidence = analysis[0]['dominant_emotion'], analysis[0]['emotion'][analysis[0]['dominant_emotion']] / 100.0
-                if df_confidence > highest_confidence:
-                    highest_confidence, final_emotion, source = df_confidence, df_emotion, "DeepFace"
+                final_emotion = analysis[0]['dominant_emotion']
+                source = "DeepFace"
         except Exception as e:
-            logging.warning(f"DeepFace analysis failed: {e}")
+            logging.warning(f"DeepFace failed: {e}")
 
-        # Custom model analysis
-        if custom_model:
-            try:
-                processed_img = preprocess_image_for_custom_model(img_color)
-                prediction_result = custom_model(tf.constant(processed_img, dtype=tf.float32))
-                prediction_tensor = list(prediction_result.values())[0]
-                cm_confidence = np.max(prediction_tensor)
-                if cm_confidence > highest_confidence:
-                    final_emotion = EMOTION_LABELS[np.argmax(prediction_tensor)]
-                    source = "Custom Model"
-            except Exception as e:
-                logging.warning(f"Custom model prediction failed: {e}")
+        # If a valid emotion is detected, change music and wallpaper
+        if final_emotion in EMOTION_MAP:
+            music_file = EMOTION_MAP[final_emotion]["music"]
+            wallpaper_file = EMOTION_MAP[final_emotion]["wallpaper"]
+
+            # Run in threadpool to avoid blocking the API
+            await run_in_threadpool(play_music, music_file)
+            await run_in_threadpool(change_wallpaper, wallpaper_file)
         
-        logging.info(f"🏆 Final Emotion: {final_emotion} for User: {current_user.id}")
-        
-        # --- 4. Database Logging & Command Generation ---
-        if final_emotion != "unknown":
-            # Log the emotion with the admin client
-            supabase_admin.from_("emotion_logs").insert({"user_id": current_user.id, "emotion": final_emotion}).execute()
-            
-            try:
-                # Call the RPC function using the admin client, passing the user_id
-                result = supabase_admin.rpc('process_emotion_and_get_commands', {'detected_emotion': final_emotion, 'user_id_param': str(current_user.id)}).execute()
-
-                if result.data and result.data.get('status') == 'ok':
-                    commands = result.data.get('commands', [])
-                    if commands:
-                        logging.info(f"✅ DB function successfully inserted {len(commands)} command(s).")
-                elif result.data and result.data.get('status') == 'snoozed':
-                    logging.info("User is snoozed. No commands were inserted.")
-
-            except Exception as db_error:
-                logging.error(f"Error calling database function: {db_error}\n{traceback.format_exc()}")
+        logging.info(f"🏆 Detected Emotion: {final_emotion}")
 
         return {"final_emotion": final_emotion, "source": source}
 
     except HTTPException:
-        # Re-raise HTTPException to be handled by FastAPI's error handler
         raise
     except Exception as e:
-        logging.error(f"An unexpected error occurred: {e}\n{traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail="An internal server error occurred.")
+        logging.error(f"Unexpected error: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail="Internal server error.")
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)

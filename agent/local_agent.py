@@ -5,191 +5,240 @@ import json
 import base64
 import websockets
 from dotenv import load_dotenv
-import time
 import logging
 import sys
 
 # --- Setup Logging ---
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    stream=sys.stdout,
+)
 
-# --- Configuration Loading ---
-def load_config(jwt_from_arg: str):
-    """Loads and validates configuration from the .env file and a passed JWT."""
-    logging.info("--- WellnessHub Local Agent (WebSocket Version) ---")
-    
-    load_dotenv()
-    
-    url = os.environ.get("SUPABASE_URL")
-    anon_key = os.environ.get("SUPABASE_ANON_KEY")
-    
-    # Use the JWT passed as a command-line argument
-    jwt = jwt_from_arg
+# --- Configuration ---
+load_dotenv()
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY")
 
-    if not all([url, anon_key, jwt]):
-        logging.critical("❌ FATAL ERROR: SUPABASE_URL, SUPABASE_ANON_KEY, and a valid JWT must all be provided.")
-        return None, None, None
+# --- Action Functions (with Desktop Environment Detection) ---
 
-    try:
-        # Decode the JWT to get the user ID
-        # The payload is the second part of the JWT
-        payload_b64 = jwt.split('.')[1]
-        # Pad the base64 string to a multiple of 4 if necessary
-        decoded_payload = base64.b64decode(payload_b64 + "==").decode('utf-8')
-        user_id = json.loads(decoded_payload).get('sub')
-        if not user_id: raise ValueError("User ID ('sub' claim) not found in JWT.")
-        
-        # Construct the WebSocket URL
-        ws_url = url.replace('http', 'ws').replace('https', 'wss')
-        realtime_url = f"{ws_url}/realtime/v1/websocket?apikey={anon_key}&vsn=1.0.0"
-        
-        logging.info(f"✅ Configuration loaded for user: {user_id}")
-        return realtime_url, user_id, jwt
-    except Exception as e:
-        logging.critical(f"❌ FATAL ERROR: Invalid configuration. Details: {e}")
-        return None, None, None
+def detect_desktop_env():
+    """
+    Detects the current desktop environment to use the correct command.
+    """
+    desktop = os.environ.get("XDG_CURRENT_DESKTOP", "").lower()
+    if "kde" in desktop:
+        return "kde"
+    elif "xfce" in desktop:
+        return "xfce"
+    else:
+        logging.warning(f"Unsupported desktop environment detected: {desktop}")
+        return "unknown"
 
-# --- Action Functions ---
 def change_wallpaper(image_path: str):
+    """
+    Changes the desktop wallpaper based on the detected environment (KDE or XFCE).
+    """
     logging.info(f"🖼️  Changing wallpaper to: {image_path}")
-    try:
-        # Check if the file exists before attempting to change
-        if not os.path.exists(image_path):
-            logging.error(f"    ❌ ERROR: Wallpaper image not found at: {image_path}")
-            return
+    if not os.path.exists(image_path):
+        logging.error(f"    ❌ ERROR: Wallpaper image not found at: {image_path}")
+        return
 
-        # Ensure xfconf-query is installed and available
-        subprocess.run(["xfconf-query", "-c", "xfce4-desktop", "-p", "/backdrop/screen0/monitor0/workspace0/last-image", "-s", image_path], check=True, capture_output=True, text=True)
-        logging.info("    ✅ Wallpaper changed successfully.")
-    except FileNotFoundError:
-        logging.error("    ❌ ERROR: 'xfconf-query' not found. Is XFCE desktop environment installed and configured correctly?")
+    env = detect_desktop_env()
+    logging.info(f"    Detected Desktop Environment: {env.upper()}")
+
+    try:
+        if env == "kde":
+            kde_script = f"""
+            var Desktops = desktops();
+            for (i=0;i<Desktops.length;i++) {{
+                d = Desktops[i];
+                d.wallpaperPlugin = 'org.kde.image';
+                d.currentConfigGroup = Array('Wallpaper', 'org.kde.image', 'General');
+                d.writeConfig('Image', 'file://{image_path}');
+            }}
+            """
+            subprocess.run(
+                ["qdbus", "org.kde.plasmashell", "/PlasmaShell", "org.kde.PlasmaShell.evaluateScript", kde_script],
+                check=True, capture_output=True, text=True
+            )
+            logging.info("    ✅ Wallpaper changed successfully for KDE Plasma.")
+
+        elif env == "xfce":
+            subprocess.run(
+                ["xfconf-query", "-c", "xfce4-desktop", "-p", "/backdrop/screen0/monitor0/workspace0/last-image", "-s", image_path],
+                check=True, capture_output=True, text=True
+            )
+            subprocess.run(["xfdesktop", "--reload"], check=False)
+            logging.info("    ✅ Wallpaper changed successfully for XFCE.")
+
+        else:
+            logging.warning("    ⚠️ WARNING: Unknown or unsupported desktop environment. Wallpaper not changed.")
+
+    except FileNotFoundError as e:
+        logging.error(f"    ❌ ERROR: A required command was not found. Please ensure 'qdbus' (for KDE) or 'xfconf-query' (for XFCE) is installed. Details: {e}")
     except subprocess.CalledProcessError as e:
-        logging.error(f"    ❌ ERROR changing wallpaper: {e.stderr}")
+        logging.error(f"    ❌ ERROR: The wallpaper command failed. Details: {e.stderr.strip()}")
     except Exception as e:
         logging.error(f"    ❌ An unexpected ERROR occurred while changing wallpaper: {e}")
 
 def play_music(file_path: str):
-    logging.info(f"🎵  Playing music file: {file_path}")
+    """Plays a music file using VLC in command-line mode (no GUI)."""
+    logging.info(f"🎵  Playing music file with VLC: {file_path}")
+    if not os.path.exists(file_path):
+        logging.error(f"    ❌ ERROR: Music file not found at: {file_path}")
+        return
     try:
-        if not os.path.exists(file_path):
-            logging.error(f"    ❌ ERROR: Music file not found at: {file_path}")
-            return
-
-        # Use MOC (Music On Console)
-        # -S: stop the current player; -c: clear the playlist; -a: add file; -p: play
-        subprocess.run(["mocp", "-S"], check=False, capture_output=True) # Don't check=True as it may fail if mocp is not running
-        subprocess.run(["mocp", "-c", "-a", file_path, "-p"], check=True, capture_output=True)
-        logging.info("    ✅ Music started successfully.")
+        subprocess.run(["killall", "vlc"], check=False, capture_output=True)
+        subprocess.Popen(["cvlc", "--play-and-exit", file_path], 
+                         stdout=subprocess.DEVNULL, 
+                         stderr=subprocess.DEVNULL)
+        logging.info("    ✅ Music started successfully with VLC.")
     except FileNotFoundError:
-        logging.error("    ❌ ERROR: 'mocp' not found. Please install MOCP for music playback.")
-    except subprocess.CalledProcessError as e:
-        logging.error(f"    ❌ ERROR controlling MOC: {e.stderr}")
+        logging.error("    ❌ ERROR: 'vlc' command not found. Please ensure VLC is installed ('sudo apt install vlc').")
     except Exception as e:
-        logging.error(f"    ❌ An unexpected ERROR occurred while playing music: {e}")
+        logging.error(f"    ❌ An unexpected ERROR occurred while playing music with VLC: {e}")
+
 
 def speak_message(message: str):
+    """Speaks a message using the espeak text-to-speech engine."""
     logging.info(f"🗣️  Saying: '{message}'")
     try:
-        # Use espeak
-        subprocess.run(["espeak", f'{message}'], check=True, capture_output=True)
+        subprocess.run(["espeak", message], check=True, capture_output=True)
         logging.info("    ✅ Message spoken successfully.")
     except FileNotFoundError:
         logging.error("    ❌ ERROR: 'espeak' not found. Please install espeak for text-to-speech.")
     except subprocess.CalledProcessError as e:
-        logging.error(f"    ❌ ERROR with espeak: {e.stderr}")
-    except Exception as e:
-        logging.error(f"    ❌ An unexpected ERROR occurred while speaking: {e}")
+        logging.error(f"    ❌ ERROR with espeak: {e.stderr.strip()}")
 
-# --- WebSocket Message Handling ---
-ACTION_MAP = {"change_wallpaper": change_wallpaper, "play_music": play_music, "speak": speak_message}
+# Maps action strings to functions
+ACTION_MAP = {
+    "change_wallpaper": change_wallpaper,
+    "play_music": play_music,
+    "speak_message": speak_message
+}
 
-def handle_message(message_str):
-    """Parses incoming WebSocket messages from Supabase and triggers actions."""
+def get_user_id_from_jwt(jwt: str) -> str | None:
+    """Safely decodes a JWT to extract the user ID ('sub' claim)."""
     try:
-        message = json.loads(message_str)
-        
-        # Acknowledge successful subscription
-        if message.get("event") == "phx_reply" and message.get("payload", {}).get("status") == "ok":
-            logging.info("✅ Successfully subscribed to Realtime channel.")
-            return
-
-        # Process a new command
-        if (message.get("event") == "postgres_changes" and 
-            message.get("payload", {}).get("data", {}).get("table") == "commands"):
-            
-            record = message.get("payload", {}).get("data", {}).get("record", {})
-            action_name = record.get("action")
-            payload_value = record.get("payload")
-
-            if action_name in ACTION_MAP:
-                logging.info("\n--- New Command Received ---")
-                ACTION_MAP[action_name](payload_value)
-                logging.info("--- Command Processed ---\n")
-    except json.JSONDecodeError:
-        logging.warning(f"Received malformed JSON message: {message_str}")
+        # The payload is the second part of the JWT, encoded in base64.
+        payload_b64 = jwt.split('.')[1]
+        # Python's base64 decoder requires padding.
+        decoded_payload = base64.b64decode(payload_b64 + "==").decode('utf-8')
+        user_id = json.loads(decoded_payload).get('sub')
+        if not user_id:
+            raise ValueError("User ID ('sub' claim) not found in JWT.")
+        return user_id
     except Exception as e:
-        logging.error(f"An error occurred while handling a message: {e}")
+        logging.critical(f"❌ FATAL ERROR: Invalid JWT provided. Could not decode user ID. Details: {e}")
+        return None
 
-# --- Main Connection Loop ---
-async def listen_to_supabase(ws_url, user_id, jwt):
-    """Connects to Supabase Realtime and handles the subscription and heartbeat loop."""
-    # The topic must be dynamic to match the user
-    topic = f"realtime:public:commands:user_id=eq.{user_id}"
+async def send_heartbeat(websocket):
+    """Sends a heartbeat message every 30 seconds to keep the connection alive."""
+    ref_counter = 1
+    while True:
+        try:
+            heartbeat_msg = {
+                "topic": "phoenix",
+                "event": "heartbeat",
+                "payload": {},
+                "ref": str(ref_counter)
+            }
+            await websocket.send(json.dumps(heartbeat_msg))
+            ref_counter += 1
+            await asyncio.sleep(30)
+        except websockets.exceptions.ConnectionClosed:
+            logging.warning("Connection closed while sending heartbeat. Stopping heartbeat task.")
+            break
+
+async def listen_to_supabase(ws_url: str, user_jwt: str):
+    """Connects to Supabase Realtime, subscribes to commands, and executes them."""
     ref_counter = 1
     
     while True:
         try:
             async with websockets.connect(ws_url) as websocket:
-                logging.info("✅ WebSocket connected to Supabase.")
+                logging.info("✅ WebSocket connected to Supabase Realtime.")
                 
-                # Subscription message
-                subscribe_msg = json.dumps({
-                    "topic": topic, "event": "phx_join",
+                # Subscribe to INSERT events on the public 'commands' table.
+                # Supabase will use the access_token (JWT) to apply Row Level Security,
+                # ensuring we only receive rows matching our user_id.
+                subscribe_msg = {
+                    "topic": "realtime:public:commands",
+                    "event": "phx_join",
                     "payload": {
-                        "config": {"postgres_changes": [{"event": "INSERT", "schema": "public", "table": "commands"}]},
-                        "access_token": jwt
+                        "config": {
+                            "postgres_changes": [
+                                {"event": "INSERT", "schema": "public", "table": "commands"}
+                            ]
+                        },
+                        "access_token": user_jwt,
                     },
-                    "ref": str(ref_counter)
-                })
-                await websocket.send(subscribe_msg)
+                    "ref": str(ref_counter),
+                }
+                
+                await websocket.send(json.dumps(subscribe_msg))
                 ref_counter += 1
-                last_heartbeat = time.time()
 
-                while True:
-                    # Send heartbeats to keep the connection alive
-                    if time.time() - last_heartbeat > 25:
-                        heartbeat_msg = json.dumps({"topic": "phoenix", "event": "heartbeat", "payload": {}, "ref": str(ref_counter)})
-                        await websocket.send(heartbeat_msg)
-                        ref_counter += 1
-                        last_heartbeat = time.time()
+                # Start the heartbeat as a concurrent background task.
+                heartbeat_task = asyncio.create_task(send_heartbeat(websocket))
+
+                # Main loop to listen for messages from the server.
+                async for message_str in websocket:
+                    message = json.loads(message_str)
                     
-                    try:
-                        # Wait for a message with a timeout
-                        message = await asyncio.wait_for(websocket.recv(), timeout=1.0)
-                        handle_message(message)
-                    except asyncio.TimeoutError:
-                        # Timeout is normal, loop to check for heartbeat
-                        continue
-        
+                    # Log successful subscription reply from Supabase.
+                    if message.get("event") == "phx_reply" and message.get("payload", {}).get("status") == "ok":
+                        logging.info("✅ Successfully subscribed to the 'commands' channel.")
+
+                    # Check for a new database INSERT event.
+                    if message.get("event") == "postgres_changes" and message["payload"]["type"] == "INSERT":
+                        command = message["payload"]["data"]
+                        action = command.get("action")
+                        payload = command.get("payload")
+                        
+                        logging.info("\n--- New Command Received ---")
+                        if action in ACTION_MAP:
+                            ACTION_MAP[action](payload)
+                        else:
+                            logging.warning(f"  ❓ Unknown action received: '{action}'")
+                        logging.info("--- Command Processed ---\n")
+
+                # If the loop exits, ensure the heartbeat task is cancelled.
+                heartbeat_task.cancel()
+
+        except websockets.exceptions.ConnectionClosed as e:
+            logging.warning(f"Connection closed: {e}. Reconnecting in 5 seconds...")
         except Exception as e:
-            logging.warning(f"Connection lost: {e}. Reconnecting in 5 seconds...")
-            
+            logging.error(f"An unexpected error occurred: {e}. Reconnecting in 5 seconds...")
+        
         await asyncio.sleep(5)
 
-async def main():
-    # Check if a JWT was provided as a command-line argument
-    if len(sys.argv) > 1:
-        jwt_from_arg = sys.argv[1]
-    else:
+def main():
+    """Parses arguments, validates config, and starts the agent."""
+    logging.info("--- WellnessHub Local Agent Initializing ---")
+    
+    # 1. Check for required environment variables.
+    if not all([SUPABASE_URL, SUPABASE_ANON_KEY]):
+        logging.critical("❌ FATAL ERROR: SUPABASE_URL and SUPABASE_ANON_KEY must be set in .env file.")
+        return
+
+    # 2. Check for the JWT from command-line arguments.
+    if len(sys.argv) < 2:
         logging.critical("❌ FATAL ERROR: JWT not provided. Usage: python local_agent.py <your_jwt_token>")
         return
+    user_jwt = sys.argv[1]
 
-    realtime_url, user_id, jwt = load_config(jwt_from_arg)
-    if not realtime_url:
-        return
-    await listen_to_supabase(realtime_url, user_id, jwt)
+    # 3. Construct the WebSocket URL.
+    # Note: Supabase URLs from the dashboard often start with 'https://'. We replace it with 'wss://'.
+    ws_base_url = SUPABASE_URL.replace('http://', 'ws://').replace('https://', 'wss://')
+    ws_url = f"{ws_base_url}/realtime/v1/websocket?apikey={SUPABASE_ANON_KEY}&vsn=1.0.0"
+
+    # 4. Start the main asyncio event loop.
+    try:
+        asyncio.run(listen_to_supabase(ws_url, user_jwt))
+    except KeyboardInterrupt:
+        logging.info("\nAgent stopped by user. Goodbye!")
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\nAgent stopped by user. Goodbye!")
+    main()
